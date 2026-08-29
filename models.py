@@ -14,13 +14,27 @@ Design notes:
   This lets us reconstruct "what did tenant X's state look like at time T"
   by replaying events up to T, which is what the simulation layer (Component 2)
   will need to backtest predictions against real history.
+
+Version 2:
+Production-grade upgrades applied:
+- Strict Numeric/Decimal types replacing Float for currency and inventory precision.
+- Composite foreign key constraints to enforce tenant isolation at DB engine level.
+- Check constraints to maintain domain invariants (e.g., non-negative prices).
+- Composite time-series indexes for efficient point-in-time state reconstruction.
+- Model lineage fields (model_version, training_timestamp, feature_snapshot) on Decisions.
+- Cryptographic hash chaining columns (hash, previous_hash) on Events for tamper auditability.
+
+
 """
 import enum
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, String, Float, Integer, DateTime, ForeignKey, Enum, JSON, Boolean
+    Index, CheckConstraint,
+    CheckConstraint, ForeignKeyConstraint, Numeric,
+    UniqueConstraint, Column, String, Float, Integer, 
+    DateTime, ForeignKey, Enum, JSON, Boolean
 )
 from sqlalchemy.orm import relationship
 
@@ -41,61 +55,95 @@ class Tenant(Base):
 
     id = Column(String, primary_key=True, default=_uuid)
     name = Column(String, nullable=False)
-    created_at = Column(DateTime, default=_now)
+    created_at = Column(DateTime, default=_now, nullable=False)
 
 
 class Supplier(Base):
     __tablename__ = "suppliers"
 
     id = Column(String, primary_key=True, default=_uuid)
-    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_supplier_tenant_id"),
+    )
 
 
 class Ingredient(Base):
     __tablename__ = "ingredients"
 
     id = Column(String, primary_key=True, default=_uuid)
-    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String, nullable=False)
-    unit = Column(String, default="unit")  # e.g. "kg", "unit", "liter"
+    unit = Column(String, default="unit", nullable=False)
 
-    # current known state (derived cache — see module docstring)
-    current_price = Column(Float, default=0.0)          # cost per unit, from supplier
-    current_supplier_id = Column(String, ForeignKey("suppliers.id"), nullable=True)
-    current_stock_level = Column(Float, default=0.0)
+        # Current known state (derived cache)
+    current_price = Column(Numeric(10, 2), nullable=False, default=0.00)
+    current_supplier_id = Column(String, nullable=True)
+    current_stock_level = Column(Numeric(12, 4), nullable=False, default=0.0000)
+
+    __table_args__ = (
+    ForeignKeyConstraint(
+    ["tenant_id", "current_supplier_id"],
+    ["suppliers.tenant_id", "suppliers.id"],
+    name="fk_ingredient_supplier_tenant",
+    ondelete="RESTRICT",
+    ),
+    CheckConstraint("current_price >= 0", name="ck_ingredient_price_positive"),
+    CheckConstraint("current_stock_level >= 0", name="ck_ingredient_stock_positive"),
+        )
 
 
 class MenuItem(Base):
     __tablename__ = "menu_items"
 
-    id = Column(String, primary_key=True, default=_uuid)
-    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
-    name = Column(String, nullable=False)
-    current_price = Column(Float, default=0.0)   # price charged to customer
-    active = Column(Boolean, default=True)         # False if 86'd / removed
 
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    current_price = Column(Numeric(10, 2), nullable=False, default=0.00)
+    active = Column(Boolean, default=True, nullable=False)
+
+    __table_args__ = (
+            UniqueConstraint("tenant_id", "id", name="uq_menu_item_tenant_id"),
+            CheckConstraint("current_price >= 0", name="ck_menu_item_price_positive"),
+        )
 
 class StaffShift(Base):
     __tablename__ = "staff_shifts"
 
     id = Column(String, primary_key=True, default=_uuid)
-    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
-    role = Column(String, nullable=False)          # e.g. "line cook", "server"
-    day_of_week = Column(Integer, nullable=False)   # 0=Mon .. 6=Sun
-    headcount = Column(Integer, default=1)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String, nullable=False)
+    day_of_week = Column(Integer, nullable=False)  # 0=Mon .. 6=Sun
+    headcount = Column(Integer, default=1, nullable=False)
 
+    __table_args__ = (
+        CheckConstraint("day_of_week >= 0 AND day_of_week <= 6", name="ck_staff_shift_day_valid"),
+        CheckConstraint("headcount >= 0", name="ck_staff_shift_headcount_positive"),
+    )
 
 class OrderVolume(Base):
     """Rolling record of order counts, used as a demand signal."""
     __tablename__ = "order_volume"
 
     id = Column(String, primary_key=True, default=_uuid)
-    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
-    menu_item_id = Column(String, ForeignKey("menu_items.id"), nullable=False)
-    timestamp = Column(DateTime, default=_now, index=True)
-    quantity = Column(Integer, default=1)
+    tenant_id = Column(String, nullable=False, index=True)
+    menu_item_id = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=_now, nullable=False, index=True)
+    quantity = Column(Integer, default=1, nullable=False)
 
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "menu_item_id"],
+            ["menu_items.tenant_id", "menu_items.id"],
+            name="fk_order_volume_menu_item_tenant",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("quantity > 0", name="ck_order_volume_quantity_positive"),
+        Index("idx_order_volume_tenant_timestamp", "tenant_id", "timestamp"),
+    )
 
 class ActionType(str, enum.Enum):
     PRICE_CHANGE = "price_change"
@@ -124,21 +172,33 @@ class Decision(Base):
     __tablename__ = "decisions"
 
     id = Column(String, primary_key=True, default=_uuid)
-    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     action_type = Column(Enum(ActionType), nullable=False)
-    action_payload = Column(JSON, nullable=False)          # the proposed action's parameters
+    action_payload = Column(JSON, nullable=False)
 
-    predicted_outcome = Column(JSON, nullable=True)        # {margin_change_pct, demand_change_pct, stockout_risk, ...}
-    confidence = Column(Float, nullable=True)               # simulator's own confidence, 0-1
+    predicted_outcome = Column(JSON, nullable=True)
+    confidence = Column(Numeric(5, 4), nullable=True)
     confidence_threshold_cleared = Column(Boolean, nullable=True)
 
-    actual_outcome = Column(JSON, nullable=True)            # filled in after execution + observation
-    calibration_error = Column(Float, nullable=True)        # mean abs error, predicted vs actual
+    actual_outcome = Column(JSON, nullable=True)
+    calibration_error = Column(Numeric(8, 4), nullable=True)
 
-    status = Column(Enum(DecisionStatus), default=DecisionStatus.PROPOSED)
-    created_at = Column(DateTime, default=_now)
+    status = Column(Enum(DecisionStatus), default=DecisionStatus.PROPOSED, nullable=False)
+
+    # Model lineage and backtesting metadata
+    model_version = Column(String, nullable=True, default="1.0.0")
+    training_timestamp = Column(DateTime, nullable=True)
+    feature_snapshot = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, default=_now, nullable=False)
     evaluated_at = Column(DateTime, nullable=True)
 
+    __table_args__ = (
+        CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="ck_decision_confidence_range"),
+        CheckConstraint("calibration_error >= 0.0", name="ck_decision_calibration_error_positive"),
+        Index("idx_decisions_tenant_status", "tenant_id", "status"),
+        Index("idx_decisions_tenant_created", "tenant_id", "created_at"),
+    )
 
 class EventType(str, enum.Enum):
     SUPPLIER_PRICE_CHANGE = "supplier_price_change"
@@ -163,11 +223,16 @@ class Event(Base):
     __tablename__ = "events"
 
     id = Column(String, primary_key=True, default=_uuid)
-    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     event_type = Column(Enum(EventType), nullable=False)
-    timestamp = Column(DateTime, default=_now, index=True)
+    timestamp = Column(DateTime, default=_now, nullable=False, index=True)
     payload = Column(JSON, nullable=False, default=dict)
-    # Was this event generated by the background simulator, or by an
-    # agent-executed action (Component 4)? Lets us separate "world events"
-    # from "actions Patty took" in the same log.
-    source = Column(String, default="simulator")  # "simulator" | "agent_action"
+    source = Column(String, default="simulator", nullable=False)
+
+    # Cryptographic ledger audit verification
+    hash = Column(String(64), nullable=True)
+    previous_hash = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("idx_events_tenant_timestamp", "tenant_id", "timestamp"),
+    )

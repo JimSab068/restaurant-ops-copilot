@@ -333,14 +333,7 @@ def append_event(
                 previous_hash=previous_hash,
                 timestamp=now,
             )
-            print("=== HASH INPUT BEFORE DB ===")
-            print("previous_hash:", repr(previous_hash))
-            print("event_type:", repr(str_event_type))
-            print("payload:", repr(payload))
-            print("timestamp_iso:", repr(timestamp_iso))
-            print("event_hash:", repr(event_hash))
-            print("============================")
-
+            
             session.add(event)
             
             # Synchronize state projection (read-model tables) within the same transaction
@@ -348,36 +341,7 @@ def append_event(
 
             session.commit()
             session.refresh(event)
-
-            print("=== HASH INPUT AFTER DB ===")
-            print("previous_hash:", repr(event.previous_hash))
-            print("event_type:", repr(
-                event.event_type.value
-                if hasattr(event.event_type, "value")
-                else str(event.event_type)
-            ))
-            print("payload:", repr(event.payload))
-            print("timestamp:", repr(event.timestamp))
-            print("timestamp_iso:", repr(_canonical_timestamp(event.timestamp)))
-
-            after_hash = _compute_sha256_hash(
-                previous_hash=event.previous_hash,
-                event_type=(
-                    event.event_type.value
-                    if hasattr(event.event_type, "value")
-                    else str(event.event_type)
-                ),
-                payload=event.payload or {},
-                timestamp_iso=_canonical_timestamp(event.timestamp),
-            )
-
-            print("stored hash:", repr(event.hash))
-            print("recomputed:", repr(after_hash))
-            print("MATCH:", after_hash == event.hash)
-            print("===========================")
-
-
-            
+         
             session.expunge(event)
             
             logger.info("Recorded event %s for tenant %s [hash: %s]", str_event_type, clean_tenant_id, event_hash[:8])

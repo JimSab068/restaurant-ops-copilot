@@ -131,7 +131,7 @@ class OrderVolume(Base):
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, nullable=False, index=True)
     menu_item_id = Column(String, nullable=False)
-    timestamp = Column(DateTime, default=_now, nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=_now, nullable=False, index=True)
     quantity = Column(Integer, default=1, nullable=False)
 
     __table_args__ = (
@@ -225,7 +225,7 @@ class Event(Base):
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     event_type = Column(Enum(EventType), nullable=False)
-    timestamp = Column(DateTime, default=_now, nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=_now, nullable=False, index=True)
     payload = Column(JSON, nullable=False, default=dict)
     source = Column(String, default="simulator", nullable=False)
 

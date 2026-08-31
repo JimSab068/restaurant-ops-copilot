@@ -5,10 +5,10 @@ correct.
 """
 from datetime import datetime, timedelta, timezone
 import pytest
-from db import get_session
-from models import Ingredient, MenuItem, EventType, Event, Tenant
-from event_store import get_db_context  # Adjust module import path as needed
-from event_store import (
+from Component_1.db import get_session
+from Component_1.models import Ingredient, MenuItem, EventType, Event, Tenant
+from Component_1.event_store import get_db_context  # Adjust module import path as needed
+from Component_1.event_store import (
     EventStoreError,
     HashChainCorruptedError,
     TenantIsolationError,

@@ -1,13 +1,13 @@
 """
 Tests for models.py — entity schema, defaults, and tenant scoping.
 """
-from db import get_session
+from Component_1.db import get_session
 from datetime import datetime, timezone
 from decimal import Decimal
 import pytest  # <--- Add this line
 from sqlalchemy.exc import IntegrityError
 
-from models import (
+from Component_1.models import (
     Tenant, 
     Supplier, 
     Ingredient, 

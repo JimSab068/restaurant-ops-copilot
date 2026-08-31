@@ -10,13 +10,13 @@ import math
 
 import pytest
 
-from ground_truth import (
+from Component_2.ground_truth import (
     MAX_STOCKOUT_PROBABILITY,
     ActualOutcome,
     observe_actual_outcome,
 )
-from models import ActionType
-from simulator import PredictedOutcome
+from Component_1.models import ActionType
+from Component_2.simulator import PredictedOutcome
 
 
 class DeterministicRNG:

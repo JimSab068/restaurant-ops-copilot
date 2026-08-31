@@ -16,8 +16,8 @@ import event_generator
 from event_generator import ( 
     EventGenerationError, _fire_random_event, _get_tenant_ingredients, _get_tenant_menu_items, run_once 
 ) 
-from models import Event, EventType, Ingredient, MenuItem, Tenant 
-from db import get_session
+from Component_1.models import Event, EventType, Ingredient, MenuItem, Tenant 
+from Component_1.db import get_session
 
 
 

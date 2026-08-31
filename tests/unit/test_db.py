@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from db import (
+from Component_1.db import (
     Base,
     engine,
     get_db_context,
@@ -73,7 +73,7 @@ def test_get_db_context_commits_on_success():
 
 def test_get_db_context_rolls_back_and_closes_on_exception():
     """Verify `get_db_context` executes a rollback, logs error, and closes session on unhandled exceptions."""
-    with patch("db.SessionLocal") as mock_session_factory:
+    with patch("Component_1.db.SessionLocal") as mock_session_factory:
         mock_session = MagicMock()
         mock_session_factory.return_value = mock_session
 

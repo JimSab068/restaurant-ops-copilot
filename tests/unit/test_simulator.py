@@ -17,11 +17,11 @@ These tests validate:
     - database failure propagation
 """
 import pytest
-from db import get_session
+from Component_1.db import get_session
 from decimal import Decimal
 from unittest.mock import patch
-from models import Ingredient, MenuItem, ActionType
-from simulator import (
+from Component_1.models import Ingredient, MenuItem, ActionType
+from Component_2.simulator import (
     SimulatorInputError,
     PredictedOutcome,
     simulate,
@@ -200,6 +200,7 @@ def test_price_change_rejects_invalid_price(
             bad_price,
         )
 
+from Component_1.models import MenuItem
 
 def test_price_change_rejects_zero_current_price(
     tenant_with_data,
@@ -208,7 +209,7 @@ def test_price_change_rejects_zero_current_price(
 
     try:
         item = session.get(
-            __import__("models").MenuItem,
+            MenuItem,
             tenant_with_data["pizza_id"],
         )
 
@@ -654,7 +655,7 @@ def test_database_failure_is_propagated(
     tenant_with_data,
 ):
     with patch(
-        "simulator.get_db_context",
+        "Component_2.simulator.get_db_context",
         side_effect=RuntimeError("database unavailable"),
     ):
         with pytest.raises(

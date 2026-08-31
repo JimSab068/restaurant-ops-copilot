@@ -19,11 +19,11 @@ Coverage:
     - database failures
 """
 import pytest
-from db import get_session
-from models import Decision, DecisionStatus, ActionType
+from Component_1.db import get_session
+from Component_1.models import Decision, DecisionStatus, ActionType
 
 from unittest.mock import MagicMock
-from decision_engine import (
+from Component_2.decision_engine import (
     CONFIDENCE_THRESHOLD,
     DecisionNotFoundError,
     DecisionStateError,
@@ -502,7 +502,7 @@ def test_confidence_must_be_finite(
     prediction.demand_change_pct = 1.0
 
     monkeypatch.setattr(
-        "decision_engine.simulate",
+        "Component_2.decision_engine.simulate",
         lambda *args, **kwargs: prediction,
     )
 
@@ -537,7 +537,7 @@ def test_invalid_confidence_is_rejected(
     }
 
     monkeypatch.setattr(
-        "decision_engine.simulate",
+        "Component_2.decision_engine.simulate",
         lambda *args, **kwargs: prediction,
     )
 
@@ -568,7 +568,7 @@ def test_observation_failure_does_not_return_evaluated_decision(
         raise RuntimeError("ground truth unavailable")
 
     monkeypatch.setattr(
-        "decision_engine.observe_actual_outcome",
+        "Component_2.decision_engine.observe_actual_outcome",
         failing_observation,
     )
 
@@ -601,7 +601,7 @@ def test_database_failure_during_proposal_is_propagated(
             return False
 
     monkeypatch.setattr(
-        "decision_engine.get_db_context",
+        "Component_2.decision_engine.get_db_context",
         lambda tenant_id: BrokenContext(),
     )
 

@@ -18,6 +18,22 @@ class OpportunityType(str, Enum):
     DEMAND_DECLINE = "demand_decline"
 
 
+class CandidateSource(str, Enum):
+    """
+    Where a CandidateAction originated.
+
+    Recorded on every candidate so Component 7 can later compare
+    deterministic vs. LLM-assisted reasoning (validity rate, simulated
+    impact, human-override rate) without having to guess provenance
+    after the fact. This is metadata only — it never grants a candidate
+    any additional authority; Component 6 classifies risk identically
+    regardless of source.
+    """
+
+    DETERMINISTIC = "deterministic"
+    LLM = "llm"
+
+
 @dataclass(frozen=True)
 class Opportunity:
     """A read-only, tenant-scoped explanation of an actionable condition."""
@@ -33,7 +49,12 @@ class Opportunity:
     evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.id or not self.tenant_id:
+        if (
+            not isinstance(self.id, str)
+            or not self.id.strip()
+            or not isinstance(self.tenant_id, str)
+            or not self.tenant_id.strip()
+        ):
             raise ValueError("opportunity id and tenant_id are required")
 
         if not isinstance(self.opportunity_type, OpportunityType):
@@ -45,8 +66,20 @@ class Opportunity:
         if not isinstance(self.cause, str) or not self.cause.strip():
             raise ValueError("opportunity cause is required")
 
-        if not self.affected_entity_ids:
+        if (
+            not isinstance(self.affected_entity_ids, tuple)
+            or not self.affected_entity_ids
+        ):
             raise ValueError("an opportunity must name an affected entity")
+
+        if any(
+            not isinstance(entity_id, str) or not entity_id.strip()
+            for entity_id in self.affected_entity_ids
+        ):
+            raise ValueError("affected_entity_ids must contain non-empty strings")
+
+        if not isinstance(self.evidence, Mapping):
+            raise TypeError("evidence must be a mapping")
 
         for field_name in ("estimated_monthly_impact", "confidence"):
             value = getattr(self, field_name)
@@ -67,7 +100,6 @@ class Opportunity:
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise ValueError("confidence must be between 0 and 1")
 
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -84,7 +116,14 @@ class Opportunity:
 
 @dataclass(frozen=True)
 class CandidateAction:
-    """A proposed action; it is not authority to execute that action."""
+    """
+    A proposed action.
+
+    A CandidateAction is NEVER execution authority, regardless of source.
+    Every candidate — deterministic or LLM — must still pass through
+    Component 2 simulation and Component 6 policy/risk classification
+    before anything executes.
+    """
 
     opportunity_id: str
     action_type: ActionType
@@ -92,6 +131,7 @@ class CandidateAction:
     rationale: str
     requires_human_review: bool = False
     assumptions: tuple[str, ...] = ()
+    source: CandidateSource = CandidateSource.DETERMINISTIC
 
     def __post_init__(self) -> None:
         if not self.opportunity_id:
@@ -100,8 +140,16 @@ class CandidateAction:
             raise TypeError("action_type must be an ActionType")
         if not isinstance(self.payload, Mapping) or not self.payload:
             raise ValueError("payload must be a non-empty mapping")
-        if not self.rationale.strip():
+        if not isinstance(self.rationale, str) or not self.rationale.strip():
             raise ValueError("rationale is required")
+        if not isinstance(self.requires_human_review, bool):
+            raise TypeError("requires_human_review must be bool")
+        if not isinstance(self.source, CandidateSource):
+            raise TypeError("source must be a CandidateSource")
+        if not isinstance(self.assumptions, tuple) or any(
+            not isinstance(assumption, str) for assumption in self.assumptions
+        ):
+            raise TypeError("assumptions must be a tuple of strings")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,4 +159,5 @@ class CandidateAction:
             "rationale": self.rationale,
             "requires_human_review": self.requires_human_review,
             "assumptions": list(self.assumptions),
+            "source": self.source.value,
         }

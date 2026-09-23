@@ -38,6 +38,9 @@ from Component_1.models import ActionType
 
 from .models import CandidateAction, CandidateSource, Opportunity
 
+from decimal import Decimal, InvalidOperation
+
+from Component_4.critic import MAX_PRICE_CHANGE_PCT
 
 class CandidateValidationError(ValueError):
     """Raised when an LLM candidate violates the Component 3 contract."""
@@ -135,36 +138,55 @@ def validate_llm_candidate(
 # Domain / anti-hallucination validation
 # ---------------------------------------------------------------------------
 
+_PRICE_CHANGE_KEYS = frozenset({"menu_item_id", "new_price"})
+
+
+def _strict_decimal(value: Any) -> Decimal | None:
+    """A finite Decimal for a real JSON number; None for bool, strings, NaN, inf."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        number = value
+    elif isinstance(value, (int, float)):
+        try:
+            number = Decimal(str(value))  # str() avoids binary-float noise at the bound
+        except InvalidOperation:
+            return None
+    else:
+        return None
+    return number if number.is_finite() else None
+
 def _validate_price_change_against_opportunity(
     candidate: CandidateAction,
     opportunity: Opportunity,
 ) -> bool:
     payload = candidate.payload
 
-    menu_item_id = payload.get("menu_item_id")
-    new_price = payload.get("new_price")
+    # Exact key set: nothing extra can ride along to execution.
+    if set(payload) != _PRICE_CHANGE_KEYS:
+        return False
 
+    menu_item_id = payload["menu_item_id"]
     if not isinstance(menu_item_id, str) or not menu_item_id:
         return False
 
-    # The anti-hallucination check: the LLM must reference an entity ID
-    # the opportunity itself actually named, never one it invented.
+    # Anti-hallucination: the entity must be one the opportunity named.
     if menu_item_id not in opportunity.affected_entity_ids:
         return False
 
-    if isinstance(new_price, bool):
+    new_price = _strict_decimal(payload["new_price"])
+    current_price = _strict_decimal(opportunity.evidence.get("current_price"))
+
+    # Fail closed if either side cannot be verified as a real positive number.
+    if new_price is None or current_price is None:
+        return False
+    if new_price <= 0 or current_price <= 0:
         return False
 
-    try:
-        price = float(new_price)
-    except (TypeError, ValueError):
-        return False
-
-    if not math.isfinite(price) or price <= 0:
-        return False
-
-    return True
-
+    # Same bound the critic enforces at execution: an out-of-range figure never
+    # reaches simulation or a reviewer's queue.
+    limit = Decimal(str(MAX_PRICE_CHANGE_PCT))
+    return abs(new_price - current_price) / current_price <= limit
 
 # Every action type action_policy.py allows the LLM to propose MUST have
 # an entry here. An action type present in

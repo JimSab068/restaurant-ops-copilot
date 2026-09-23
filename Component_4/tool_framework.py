@@ -56,6 +56,12 @@ from Component_6.approval_workflow import ApprovalWorkflow
 from Component_6.risk_classifier import classify_risk
 from .idempotency import IdempotencyRegistry
 
+from .idempotency import IdempotencyRegistry, request_fingerprint
+
+from contextlib import contextmanager
+
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 # Adapter seam for an API/database-backed workflow. Keeping the state machine
 # here ensures no caller can bypass the policy check by calling a tool directly.
@@ -78,6 +84,66 @@ class ToolFrameworkError(ValueError):
 class UnsupportedToolActionError(ToolFrameworkError):
     """Raised when an action has no safe execution implementation yet."""
 
+# How long a call waits for another in-flight change to the same resource.
+STATE_CHANGE_LOCK_TIMEOUT_MS = 10_000
+
+
+class ToolBusyError(ToolFrameworkError):
+    """Another worker is changing the same resource; safe to retry."""
+
+
+def _serialization_key(
+    tenant_id: str,
+    action_type: ActionType,
+    payload: Mapping[str, Any],
+) -> str:
+    """Identify the resource whose read-validate-write must be atomic."""
+    if action_type in (ActionType.PRICE_CHANGE, ActionType.MENU_SWAP):
+        resource = payload.get("menu_item_id")
+    elif action_type == ActionType.SUPPLIER_SWITCH:
+        resource = payload.get("ingredient_id")
+    else:
+        resource = "*"  # staffing: target shift is resolved inside; lock per tenant
+    return f"tool_framework:{tenant_id}:{action_type.value}:{resource}"
+
+
+@contextmanager
+def _serialized_state_change(
+    tenant_id: str,
+    action_type: ActionType,
+    payload: Mapping[str, Any],
+):
+    """
+    Cross-process mutex for check-then-apply on one resource.
+
+    Holds a Postgres transaction-level advisory lock on a dedicated guard
+    session for the whole block. The inner calls (critic read, execute,
+    append_event) use their own sessions, so this never conflicts with
+    append_event's tenant-row lock.
+    """
+    key = _serialization_key(tenant_id, action_type, payload)
+
+    with get_db_context(tenant_id) as guard:
+        try:
+            guard.execute(
+                text("SELECT set_config('lock_timeout', :t, true)"),
+                {"t": f"{STATE_CHANGE_LOCK_TIMEOUT_MS}ms"},
+            )
+            guard.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                {"k": key},
+            )
+        except OperationalError as exc:
+            code = getattr(exc.orig, "pgcode", None) or getattr(
+                exc.orig, "sqlstate", None
+            )
+            if code == "55P03":  # lock_not_available
+                raise ToolBusyError(
+                    "timed out waiting for a concurrent change to the same "
+                    "resource"
+                ) from exc
+            raise
+        yield
 
 def _validate_tool_request(
     tenant_id: str,
@@ -717,109 +783,90 @@ def execute_tool_call(
     # ------------------------------------------------------------------
     # Independent critic
     # ------------------------------------------------------------------
-    current_value = _current_value_for_critic(
-        tenant_id,
-        action_type,
-        payload,
-    )
+    try:
+        with _serialized_state_change(tenant_id, action_type, payload):
+            # ----------------------------------------------------------
+            # Everything from the "before" read to the state write happens
+            # under the lock, so the baseline can't go stale in between.
+            # ----------------------------------------------------------
+            current_value = _current_value_for_critic(
+                tenant_id, action_type, payload,
+            )
 
-    verdict = critique(
-        action_type,
-        payload,
-        current_value,
-    )
+            verdict = critique(action_type, payload, current_value)
 
-    if not verdict.approved:
+            if not verdict.approved:
+                _log(
+                    tenant_id, decision.id, category, action_type,
+                    confidence_gate_passed,
+                    critic_approved=False,
+                    critic_reason=verdict.reason,
+                    executed=False,
+                    payload=payload,
+                )
+                return {
+                    "executed": False,
+                    "reason": "blocked_by_critic",
+                    "decision_id": decision.id,
+                    "critic_reason": verdict.reason,
+                }
+
+            risk = classify_risk(
+                action_type, dict(payload), decision, current_value,
+            )
+            if risk.requires_approval:
+                approval = approval_workflow.request(
+                    tenant_id, decision.id, risk.reason,
+                )
+                _log(
+                    tenant_id, decision.id, category, action_type,
+                    confidence_gate_passed, True, risk.reason, False, payload,
+                )
+                return {
+                    "executed": False,
+                    "reason": "pending_human_approval",
+                    "decision_id": decision.id,
+                    "approval_request_id": approval.id,
+                    "risk_level": risk.risk_level.value,
+                }
+
+            result = execute_and_observe(tenant_id, decision.id)
+            _apply_state_change(tenant_id, action_type, payload)
+
+            _log(
+                tenant_id, decision.id, category, action_type,
+                confidence_gate_passed,
+                critic_approved=True,
+                critic_reason=verdict.reason,
+                executed=True,
+                payload=payload,
+            )
+
+            return {
+                "executed": True,
+                "decision_id": result.id,
+                "calibration_error": (
+                    float(result.calibration_error)
+                    if result.calibration_error is not None
+                    else None
+                ),
+                "actual_outcome": result.actual_outcome,
+            }
+
+    except ToolBusyError as exc:
         _log(
-            tenant_id,
-            decision.id,
-            category,
-            action_type,
+            tenant_id, decision.id, category, action_type,
             confidence_gate_passed,
-            critic_approved=False,
-            critic_reason=verdict.reason,
+            critic_approved=None,
+            critic_reason=str(exc),
             executed=False,
             payload=payload,
         )
-
         return {
             "executed": False,
-            "reason": "blocked_by_critic",
+            "reason": "concurrent_change_in_progress",
             "decision_id": decision.id,
-            "critic_reason": verdict.reason,
         }
-
-    # Component 6 is intentionally independent from the critic: a request may
-    # satisfy hard business bounds while still being too consequential to run
-    # autonomously.  Hold such work for a reviewer instead of treating the
-    # simulator confidence gate as execution authority.
-    risk = classify_risk(action_type, dict(payload), decision, current_value)
-    if risk.requires_approval:
-        approval = approval_workflow.request(
-            tenant_id,
-            decision.id,
-            risk.reason,
-        )
-        _log(
-            tenant_id, decision.id, category, action_type,
-            confidence_gate_passed, True, risk.reason, False, payload,
-        )
-        return {
-            "executed": False,
-            "reason": "pending_human_approval",
-            "decision_id": decision.id,
-            "approval_request_id": approval.id,
-            "risk_level": risk.risk_level.value,
-        }
-
-    # ------------------------------------------------------------------
-    # Component 2: execute decision
-    # ------------------------------------------------------------------
-    result = execute_and_observe(
-        tenant_id,
-        decision.id,
-    )
-
-    # ------------------------------------------------------------------
-    # Component 1: update live state through event sourcing
-    #
-    # execute_and_observe() records execution/calibration but does not
-    # itself update operational current-state projections.
-    #
-    # append_event() writes the immutable event and applies its
-    # projection in the same transaction.
-    # ------------------------------------------------------------------
-    _apply_state_change(
-        tenant_id,
-        action_type,
-        payload,
-    )
-
-    # ------------------------------------------------------------------
-    # Audit log
-    # ------------------------------------------------------------------
-    _log(
-        tenant_id,
-        decision.id,
-        category,
-        action_type,
-        confidence_gate_passed,
-        critic_approved=True,
-        critic_reason=verdict.reason,
-        executed=True,
-        payload=payload,
-    )
-
-    return {
-        "executed": True,
-        "decision_id": result.id,
-        "calibration_error": (
-            float(result.calibration_error)
-            if result.calibration_error is not None
-            else None
-        ),
-        "actual_outcome": result.actual_outcome,
-    }
 
 
 def execute_approved_tool_call(tenant_id: str, approval_request_id: str) -> dict[str, Any]:
@@ -840,21 +887,36 @@ def execute_approved_tool_call(tenant_id: str, approval_request_id: str) -> dict
         if decision is None:
             raise ToolFrameworkError("approved decision not found for tenant")
         action_type, payload, decision_id = decision.action_type, dict(decision.action_payload), decision.id
-    result = execute_and_observe(tenant_id, decision_id)
-    _apply_state_change(tenant_id, action_type, payload)
+    with _serialized_state_change(tenant_id, action_type, payload):
+        result = execute_and_observe(tenant_id, decision_id)
+        _apply_state_change(tenant_id, action_type, payload)
     _log(tenant_id, decision_id, TOOL_CATEGORY_BY_ACTION[action_type], action_type, True, True, "human approval recorded", True, payload)
     return {"executed": True, "decision_id": result.id, "actual_outcome": result.actual_outcome, "calibration_error": float(result.calibration_error) if result.calibration_error is not None else None}
 
 
-def execute_tool_call_idempotent(tenant_id: str, idempotency_key: str, action_type: ActionType, payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Idempotent wrapper for callers that can provide a stable request key."""
-    tenant_id = validate_tenant_id(tenant_id)
-    cached = idempotency_registry.get(tenant_id, idempotency_key)
-    if cached is not None:
-        return cached
-    return idempotency_registry.store(
-        tenant_id, idempotency_key, execute_tool_call(tenant_id, action_type, payload)
+def execute_tool_call_idempotent(
+    tenant_id: str,
+    idempotency_key: str,
+    action_type: ActionType,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Claim-first idempotent wrapper; safe across workers."""
+    # Validate before claiming so a malformed request doesn't burn the key.
+    tenant_id, payload = _validate_tool_request(tenant_id, action_type, payload)
+
+    claim = idempotency_registry.claim(
+        tenant_id, idempotency_key, request_fingerprint(action_type.value, payload),
     )
+    if not claim.owned:
+        return claim.result
+
+    try:
+        result = execute_tool_call(tenant_id, action_type, payload)
+    except BaseException as exc:
+        idempotency_registry.fail(tenant_id, idempotency_key, exc)
+        raise
+
+    return idempotency_registry.complete(tenant_id, idempotency_key, result)
 
 
 def get_action_log(

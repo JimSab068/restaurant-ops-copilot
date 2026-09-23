@@ -68,7 +68,18 @@ import sys
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine
+import os
+os.environ["DATABASE_URL"] = "postgresql://rls_admin:1234@localhost:5432/ops_copilot"
 
+from Component_1.db import Base, engine
+import Component_1.models          # noqa: F401
+import Component_4.tool_models      # noqa: F401  <- this is the one that was missing
+import Component_4.idempotency_models  # noqa: F401
+import Component_6.approval_models     # noqa: F401
+import api.credentials_models   # noqa: F401
+import api.work_request_models  # noqa: F401
+
+Base.metadata.create_all(bind=engine)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -122,6 +133,9 @@ TENANT_SCOPED_TABLES = (
     "decisions",
     "events",
     "tool_execution_log",
+    "evaluation_records",   
+    "approval_requests",
+    "idempotency_keys",
 )
 
 ALL_RLS_TABLES = (

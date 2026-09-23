@@ -208,15 +208,11 @@ def get_db_context(
 # Database initialization / health
 # ---------------------------------------------------------------------------
 
-def init_db() -> None:
-    """
-    Create database tables.
+def init_db():
+    # Register all SQLAlchemy models before create_all().
+    import Component_1.models  # noqa: F401
+    import Component_4.tool_models  # noqa: F401
 
-    This is useful for local development and tests.
-
-    Production deployments should prefer explicit database migrations rather
-    than relying on create_all().
-    """
     Base.metadata.create_all(bind=engine)
 
 

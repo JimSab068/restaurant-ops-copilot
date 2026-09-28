@@ -209,9 +209,19 @@ def get_db_context(
 # ---------------------------------------------------------------------------
 
 def init_db():
-    # Register all SQLAlchemy models before create_all().
+    """Create every persisted application table for local/bootstrap use.
+
+    Production uses the controlled Component 5 bootstrap/migration task,
+    but local commands must not silently omit API, approval, idempotency, or
+    evaluation tables simply because their modules have not been imported.
+    """
     import Component_1.models  # noqa: F401
     import Component_4.tool_models  # noqa: F401
+    import Component_4.idempotency_models  # noqa: F401
+    import Component_6.approval_models  # noqa: F401
+    import Component_7.models  # noqa: F401
+    import api.credentials_models  # noqa: F401
+    import api.work_request_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 

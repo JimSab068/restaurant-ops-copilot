@@ -29,7 +29,7 @@ from uuid import UUID
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 
@@ -238,6 +238,6 @@ def health_check() -> bool:
 
         return True
 
-    except OperationalError:
+    except (OperationalError, SQLAlchemyTimeoutError):
         logger.exception("Database health check failed.")
         return False

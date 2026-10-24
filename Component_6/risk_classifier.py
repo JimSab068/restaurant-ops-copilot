@@ -1,55 +1,6 @@
-"""
-risk_classifier.py — Pure risk classification policy for Component 6.
-
-Component 6 sits after Component 2's prediction layer and before execution.
-It classifies the operational risk of a proposed action without performing
-any database access or execution.
-
-Architecture:
-
-    Component 2 Decision / PredictedOutcome
-                    |
-                    v
-             risk_classifier
-                    |
-                    v
-             RiskClassification
-                    |
-                    v
-          approval / execution gate
-
-The classifier deliberately does NOT:
-    - query the database
-    - mutate application state
-    - execute tools
-    - call an LLM
-    - silently coerce malformed numeric values
-
-Malformed or unverifiable inputs fail closed as HIGH risk with approval
-required.
-
-Policy:
-    LOW
-        Small, reversible price/inventory changes.
-        Autonomous execution is allowed.
-
-    MEDIUM
-        Larger price changes and supplier switches.
-        Human approval is required.
-
-    HIGH
-        Menu removal, high-uncertainty predictions, unsupported actions,
-        or invalid/unverifiable inputs.
-        Human review/rejection is required.
-
-Numeric validation is intentionally reused from critic.py rather than
-duplicated here.
-"""
-
 from __future__ import annotations
-from decimal import Decimal
-
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -61,14 +12,6 @@ from Component_4.critic import (
     _is_valid_numeric,
 )
 
-
-def _to_exact_decimal(value: Any) -> Decimal:
-    return value if isinstance(value, Decimal) else Decimal(str(value))
-
-def _pct_change(new_price: Any, current_value: Any) -> Decimal:
-    new_decimal = _to_exact_decimal(new_price)
-    current_decimal = _to_exact_decimal(current_value)
-    return abs(new_decimal - current_decimal) / current_decimal
 
 class RiskLevel(str, Enum):
     """Operational risk level assigned to a proposed action."""
@@ -88,19 +31,17 @@ class RiskClassification:
     reason: str
 
 
-# A prediction below this confidence is considered too uncertain for
-# autonomous execution. Keep this independent from the critic's hard
-# business-rule limits.
-MIN_CONFIDENCE_FOR_AUTONOMOUS_ACTION = 0.80
+MIN_CONFIDENCE_FOR_AUTONOMOUS_ACTION = Decimal("0.80")
 
-# "Small" price changes are low-risk and may be autonomous.
-# Changes above this threshold become medium-risk, subject to the critic's
-# separate hard limit of MAX_PRICE_CHANGE_PCT.
-SMALL_PRICE_CHANGE_PCT = 0.10
+# Exactly 10% remains LOW.
+SMALL_PRICE_CHANGE_PCT = Decimal("0.10")
 
 
-def _high_risk(reason: str, *, reversible: bool = False) -> RiskClassification:
-    """Create the fail-closed HIGH classification."""
+def _high_risk(
+    reason: str,
+    *,
+    reversible: bool = False,
+) -> RiskClassification:
     return RiskClassification(
         risk_level=RiskLevel.HIGH,
         reversible=reversible,
@@ -109,8 +50,11 @@ def _high_risk(reason: str, *, reversible: bool = False) -> RiskClassification:
     )
 
 
-def _medium_risk(reason: str, *, reversible: bool = True) -> RiskClassification:
-    """Create a MEDIUM classification requiring human approval."""
+def _medium_risk(
+    reason: str,
+    *,
+    reversible: bool = True,
+) -> RiskClassification:
     return RiskClassification(
         risk_level=RiskLevel.MEDIUM,
         reversible=reversible,
@@ -120,7 +64,6 @@ def _medium_risk(reason: str, *, reversible: bool = True) -> RiskClassification:
 
 
 def _low_risk(reason: str) -> RiskClassification:
-    """Create a LOW classification eligible for autonomous execution."""
     return RiskClassification(
         risk_level=RiskLevel.LOW,
         reversible=True,
@@ -129,51 +72,110 @@ def _low_risk(reason: str) -> RiskClassification:
     )
 
 
+def _to_exact_decimal(value: Any) -> Decimal:
+    """
+    Convert an already-validated numeric value to Decimal.
+
+    bool is deliberately rejected because bool is a subclass of int.
+    """
+    if isinstance(value, bool):
+        raise InvalidOperation("boolean is not a numeric policy value")
+
+    if isinstance(value, Decimal):
+        result = value
+    elif isinstance(value, int):
+        result = Decimal(value)
+    elif isinstance(value, float):
+        if not value == value or value in (float("inf"), float("-inf")):
+            raise InvalidOperation("non-finite float")
+        result = Decimal(str(value))
+    elif isinstance(value, str):
+        result = Decimal(value.strip())
+    else:
+        result = Decimal(str(value))
+
+    if not result.is_finite():
+        raise InvalidOperation("non-finite decimal")
+
+    return result
+
+
+def _pct_change(
+    new_price: Any,
+    current_value: Any,
+) -> Decimal:
+    new_decimal = _to_exact_decimal(new_price)
+    current_decimal = _to_exact_decimal(current_value)
+
+    if current_decimal <= 0:
+        raise InvalidOperation(
+            "current value must be greater than zero"
+        )
+
+    return abs(new_decimal - current_decimal) / current_decimal
+
+
 def _prediction_confidence(predicted: Any) -> Any:
-    """
-    Extract prediction confidence without coupling the policy to a concrete
-    implementation of Component 2's prediction object.
-
-    Both Decision and PredictedOutcome are expected to expose ``confidence``.
-    Missing confidence is deliberately returned as None and therefore fails
-    closed.
-    """
-    # if not isinstance(predicted, (Decision, PredictedOutcome)):
-    #     return None
-
     return getattr(predicted, "confidence", None)
 
 
 def _confidence_is_valid(predicted: Any) -> bool:
-    """Return True only when prediction confidence is finite and bounded."""
     confidence = _prediction_confidence(predicted)
 
     if not _is_valid_numeric(confidence):
         return False
 
-    return 0 <= confidence <= 1
+    if isinstance(confidence, bool):
+        return False
+
+    try:
+        confidence_decimal = _to_exact_decimal(confidence)
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+    return Decimal("0") <= confidence_decimal <= Decimal("1")
 
 
 def _confidence_is_high_enough(predicted: Any) -> bool:
-    """Return whether the prediction clears the autonomous-risk threshold."""
     confidence = _prediction_confidence(predicted)
 
-    return (
-        _confidence_is_valid(predicted)
-        and confidence >= MIN_CONFIDENCE_FOR_AUTONOMOUS_ACTION
-    )
+    if not _confidence_is_valid(predicted):
+        return False
+
+    try:
+        confidence_decimal = _to_exact_decimal(confidence)
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+    return confidence_decimal >= MIN_CONFIDENCE_FOR_AUTONOMOUS_ACTION
 
 
 def _classify_price_change(
     payload: dict[str, Any],
     current_value: Any,
 ) -> RiskClassification:
-    """Classify a proposed menu-price change."""
 
-    if not _is_valid_numeric(current_value) or current_value <= 0:
+    if not _is_valid_numeric(current_value) or isinstance(
+        current_value,
+        bool,
+    ):
         return _high_risk(
-            "Cannot classify price-change risk: current value must be a "
-            "finite number greater than zero."
+            "Cannot classify price-change risk: current value "
+            "must be a finite number greater than zero."
+        )
+
+    try:
+        current_decimal = _to_exact_decimal(current_value)
+    except (InvalidOperation, TypeError, ValueError):
+        return _high_risk(
+            "Cannot classify price-change risk: current value "
+            "must be a finite number."
+        )
+
+    if current_decimal <= 0:
+        return _high_risk(
+            "Cannot classify price-change risk: current value "
+            "must be greater than zero."
         )
 
     if "new_price" not in payload:
@@ -183,34 +185,55 @@ def _classify_price_change(
 
     new_price = payload["new_price"]
 
-    if not _is_valid_numeric(new_price):
+    if not _is_valid_numeric(new_price) or isinstance(
+        new_price,
+        bool,
+    ):
         return _high_risk(
-            "Cannot classify price-change risk: new_price must be a "
-            "finite number."
+            "Cannot classify price-change risk: new_price "
+            "must be a finite number."
         )
 
-    pct_change = _pct_change(new_price, current_value) 
-    small_price_change_pct = Decimal(str(SMALL_PRICE_CHANGE_PCT))
-    max_price_change_pct = Decimal(str(MAX_PRICE_CHANGE_PCT))
+    try:
+        new_decimal = _to_exact_decimal(new_price)
+        pct_change = _pct_change(
+            new_decimal,
+            current_decimal,
+        )
+        max_price_change_pct = _to_exact_decimal(
+            MAX_PRICE_CHANGE_PCT
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return _high_risk(
+            "Cannot classify price-change risk: numeric values "
+            "could not be represented exactly."
+        )
 
-    # The critic independently enforces the hard 30% price-change bound.
-    # Component 6 only classifies the operational risk.
+    if new_decimal < 0:
+        return _high_risk(
+            "Cannot classify price-change risk: new_price "
+            "cannot be negative."
+        )
+
+    # HARD LIMIT: strictly greater than 30%.
     if pct_change > max_price_change_pct:
         return _high_risk(
-            f"Price change of {pct_change:.0%} exceeds the critic's "
-            f"{MAX_PRICE_CHANGE_PCT:.0%} hard limit."
+            f"Price change of {pct_change:.2%} exceeds the critic's "
+            f"{max_price_change_pct:.2%} hard limit."
         )
 
-    if pct_change <= small_price_change_pct:
+    # IMPORTANT:
+    # <= means exactly 10% is LOW.
+    if pct_change <= SMALL_PRICE_CHANGE_PCT:
         return _low_risk(
-            f"Small price change of {pct_change:.0%}; reversible and "
+            f"Small price change of {pct_change:.2%}; reversible and "
             "eligible for autonomous execution."
         )
 
     return _medium_risk(
-        f"Price change of {pct_change:.0%} is larger than the "
-        f"{small_price_change_pct:.0%} autonomous threshold and requires "
-        "human approval."
+        f"Price change of {pct_change:.2%} is larger than the "
+        f"{SMALL_PRICE_CHANGE_PCT:.2%} autonomous threshold and "
+        "requires human approval."
     )
 
 
@@ -218,16 +241,28 @@ def _classify_supplier_switch(
     payload: dict[str, Any],
     current_value: Any,
 ) -> RiskClassification:
-    """
-    Supplier switches are inherently MEDIUM risk.
 
-    The critic separately validates the supplier price and its hard
-    percentage bound. This classifier does not duplicate that business rule.
-    """
-    if not _is_valid_numeric(current_value) or current_value <= 0:
+    if (
+        not _is_valid_numeric(current_value)
+        or isinstance(current_value, bool)
+    ):
         return _high_risk(
-            "Cannot classify supplier-switch risk: current value must be "
-            "a finite number greater than zero."
+            "Cannot classify supplier-switch risk: current value "
+            "must be a finite number greater than zero."
+        )
+
+    try:
+        current_decimal = _to_exact_decimal(current_value)
+    except (InvalidOperation, TypeError, ValueError):
+        return _high_risk(
+            "Cannot classify supplier-switch risk: current value "
+            "must be numeric."
+        )
+
+    if current_decimal <= 0:
+        return _high_risk(
+            "Cannot classify supplier-switch risk: current value "
+            "must be greater than zero."
         )
 
     if "new_supplier_price" not in payload:
@@ -236,15 +271,32 @@ def _classify_supplier_switch(
             "new_supplier_price is missing."
         )
 
-    if not _is_valid_numeric(payload["new_supplier_price"]):
+    new_price = payload["new_supplier_price"]
+
+    if (
+        not _is_valid_numeric(new_price)
+        or isinstance(new_price, bool)
+    ):
         return _high_risk(
-            "Cannot classify supplier-switch risk: new_supplier_price "
-            "must be a finite number."
+            "Cannot classify supplier-switch risk: "
+            "new_supplier_price must be a finite number."
+        )
+
+    try:
+        if _to_exact_decimal(new_price) < 0:
+            return _high_risk(
+                "Cannot classify supplier-switch risk: "
+                "new_supplier_price cannot be negative."
+            )
+    except (InvalidOperation, TypeError, ValueError):
+        return _high_risk(
+            "Cannot classify supplier-switch risk: "
+            "new_supplier_price must be numeric."
         )
 
     return _medium_risk(
-        "Supplier switches affect procurement relationships and require "
-        "human approval.",
+        "Supplier switches affect procurement relationships "
+        "and require human approval.",
         reversible=True,
     )
 
@@ -252,42 +304,64 @@ def _classify_supplier_switch(
 def _classify_menu_swap(
     payload: dict[str, Any],
 ) -> RiskClassification:
-    """Classify menu changes, with removal treated as HIGH risk."""
 
     action = payload.get("action")
 
     if action == "remove":
         return _high_risk(
-            "Menu-item removal is a high-impact action and requires human "
-            "review before execution.",
+            "Menu-item removal is a high-impact action and requires "
+            "human review before execution.",
             reversible=False,
         )
 
-    # MENU_SWAP add is currently unsupported by the execution framework.
-    # Treating an unknown menu operation as low risk would violate the
-    # fail-closed policy.
     return _high_risk(
         f"Unsupported MENU_SWAP action: {action!r}. "
         "Manual review is required."
     )
 
 
-def _classify_staffing_change(payload: dict[str, Any]) -> RiskClassification:
+def _classify_staffing_change(
+    payload: dict[str, Any],
+) -> RiskClassification:
+
     if "headcount_delta" not in payload:
-        return _high_risk("Cannot classify staffing-change risk: headcount_delta is missing.")
+        return _high_risk(
+            "Cannot classify staffing-change risk: "
+            "headcount_delta is missing."
+        )
 
     delta = payload["headcount_delta"]
 
+    if isinstance(delta, bool):
+        return _high_risk(
+            "Cannot classify staffing-change risk: "
+            "headcount_delta cannot be boolean."
+        )
+
     if not _is_valid_numeric(delta):
-        return _high_risk("Cannot classify staffing-change risk: headcount_delta must be a finite number.")
+        return _high_risk(
+            "Cannot classify staffing-change risk: "
+            "headcount_delta must be a finite number."
+        )
 
-    if isinstance(delta, float) and not delta.is_integer():
-        return _high_risk(f"Headcount change of {delta} must be an integer.")
+    try:
+        delta_decimal = _to_exact_decimal(delta)
+    except (InvalidOperation, TypeError, ValueError):
+        return _high_risk(
+            "Cannot classify staffing-change risk: "
+            "headcount_delta must be numeric."
+        )
 
-    if isinstance(delta, Decimal) and delta != delta.to_integral_value():
-        return _high_risk(f"Headcount change of {delta} must be an integer.")
+    # Staffing headcount is discrete.
+    if delta_decimal != delta_decimal.to_integral_value():
+        return _high_risk(
+            f"Headcount change of {delta_decimal} must be an integer."
+        )
 
-    return _medium_risk("Staffing changes affect scheduled labor and require human approval.")
+    return _medium_risk(
+        "Staffing changes affect scheduled labor and require "
+        "human approval."
+    )
 
 
 def classify_risk(
@@ -296,37 +370,6 @@ def classify_risk(
     predicted: Decision | PredictedOutcome,
     current_value: Any,
 ) -> RiskClassification:
-    """
-    Classify the operational risk of a proposed action.
-
-    Parameters
-    ----------
-    action_type:
-        Component 1 ActionType identifying the proposed operation.
-
-    payload:
-        Action-specific values. Numeric values are validated using the
-        existing critic.py numeric validator.
-
-    predicted:
-        Component 2 Decision or PredictedOutcome containing the simulator's
-        confidence.
-
-    current_value:
-        Caller-supplied pre-change value where the action requires one.
-        No database access occurs here.
-
-    Returns
-    -------
-    RiskClassification
-        Immutable LOW/MEDIUM/HIGH risk classification.
-
-    Fail-closed behavior
-    --------------------
-    Unknown action types, malformed payloads, invalid numeric inputs,
-    invalid prediction objects, and missing/invalid confidence are HIGH risk
-    and require approval.
-    """
 
     if not isinstance(action_type, ActionType):
         return _high_risk(
@@ -338,29 +381,39 @@ def classify_risk(
             "Action payload must be a dictionary."
         )
 
-    # Confidence is a universal safety gate. A risk classifier must never
-    # downgrade an uncertain prediction merely because the requested action
-    # itself appears operationally small.
     if not _confidence_is_valid(predicted):
         return _high_risk(
-            "Prediction confidence is missing, invalid, or outside the "
-            "valid range [0, 1]."
+            "Prediction confidence is missing, invalid, or outside "
+            "the valid range [0, 1]."
         )
 
     if not _confidence_is_high_enough(predicted):
         confidence = _prediction_confidence(predicted)
+
+        try:
+            confidence_decimal = _to_exact_decimal(confidence)
+            confidence_text = f"{confidence_decimal:.3f}"
+        except (InvalidOperation, TypeError, ValueError):
+            confidence_text = repr(confidence)
+
         return _high_risk(
-            f"Prediction confidence {confidence:.3f} is below the "
+            f"Prediction confidence {confidence_text} is below the "
             f"{MIN_CONFIDENCE_FOR_AUTONOMOUS_ACTION:.2f} risk threshold; "
             "human review is required.",
             reversible=True,
         )
 
     if action_type == ActionType.PRICE_CHANGE:
-        return _classify_price_change(payload, current_value)
+        return _classify_price_change(
+            payload,
+            current_value,
+        )
 
     if action_type == ActionType.SUPPLIER_SWITCH:
-        return _classify_supplier_switch(payload, current_value)
+        return _classify_supplier_switch(
+            payload,
+            current_value,
+        )
 
     if action_type == ActionType.MENU_SWAP:
         return _classify_menu_swap(payload)
@@ -368,9 +421,7 @@ def classify_risk(
     if action_type == ActionType.STAFFING_CHANGE:
         return _classify_staffing_change(payload)
 
-    # Keep this explicit even though ActionType validation above makes it
-    # difficult to reach. It protects the classifier if new enum members are
-    # added without a corresponding Component 6 policy.
     return _high_risk(
-        f"No risk policy is defined for action type: {action_type.value!r}."
+        f"No risk policy is defined for action type: "
+        f"{action_type.value!r}."
     )

@@ -12,6 +12,20 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
+
+from Component_1.db import Base
+from Component_1.models import _now, _uuid
 
 def canonical_tenant_id(tenant_id: str) -> str:
     """Validate and normalize the UUID tenant identity used by Component 1."""
@@ -88,3 +102,63 @@ class EvaluationRecord:
             number = _optional_finite(getattr(self, field_name), field_name)
             if field_name in {"latency_ms", "cost_usd"} and number is not None and number < 0:
                 raise ValueError(f"{field_name} must be non-negative")
+
+
+class EvaluationRecordRow(Base):
+    """One durable Component 7 observation."""
+
+    __tablename__ = "evaluation_records"
+
+    id = Column(String, primary_key=True, default=_uuid)
+
+    tenant_id = Column(
+        String,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Caller-supplied identifier; unique per tenant, not globally.
+    record_id = Column(String, nullable=False)
+
+    decision_id = Column(String, nullable=True)
+    action_type = Column(String, nullable=True)
+
+    opportunity_was_correct = Column(Boolean, nullable=True)
+    candidate_was_valid = Column(Boolean, nullable=True)
+    decision_succeeded = Column(Boolean, nullable=True)
+    human_overrode = Column(Boolean, nullable=True)
+    policy_violation = Column(Boolean, nullable=True)
+    isolation_breach = Column(Boolean, nullable=True)
+    execution_failed = Column(Boolean, nullable=True)
+    autonomous = Column(Boolean, nullable=True)
+
+    retry_count = Column(Integer, nullable=True)
+
+    latency_ms = Column(Float, nullable=True)
+    cost_usd = Column(Float, nullable=True)
+    predicted_economic_impact = Column(Float, nullable=True)
+    actual_economic_impact = Column(Float, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "record_id",
+            name="uq_evaluation_record_tenant_record_id",
+        ),
+        CheckConstraint(
+            "retry_count IS NULL OR retry_count >= 0",
+            name="ck_evaluation_record_retry_count_nonnegative",
+        ),
+        CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="ck_evaluation_record_latency_nonnegative",
+        ),
+        CheckConstraint(
+            "cost_usd IS NULL OR cost_usd >= 0",
+            name="ck_evaluation_record_cost_nonnegative",
+        ),
+    )
+
+    

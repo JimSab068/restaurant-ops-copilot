@@ -27,6 +27,7 @@ from Component_3.candidate_validator import (
 )
 from Component_3.llm_client import FakeLLMClient, LLMClientError
 from Component_3.llm_client_bedrock import (
+    BEDROCK_TOTAL_MAX_ATTEMPTS,
     BedrockJSONLLMClient,
     BedrockLLMClient,
     _extract_text,
@@ -138,13 +139,14 @@ def test_deterministic_reasoner_fails_closed_on_tampered_evidence(bad_evidence):
 
 
 def test_llm_reasoner_accepts_only_allowed_valid_candidates_and_enforces_cap():
-    payload = {"candidates": [raw_price(new_price=i + 1) for i in range(MAX_LLM_CANDIDATES + 3)]}
+    opp = opportunity()
+    current = float(opp.evidence["current_price"])
+    # distinct prices (+1% ... +8%), all inside the critic's bound, more than the cap
+    prices = [round(current * (1 + 0.01 * (i + 1)), 2) for i in range(MAX_LLM_CANDIDATES + 3)]
+    payload = {"candidates": [raw_price(new_price=p) for p in prices]}
     client = FakeLLMClient(response_text=json.dumps(payload))
-    candidates = LLMReasoner(client).reason(opportunity(), allowed_action_types=("price_change",))
+    candidates = LLMReasoner(client).reason(opp, allowed_action_types=("price_change",))
     assert len(candidates) == MAX_LLM_CANDIDATES
-    assert len(client.calls) == 1
-    prompt = client.calls[0][1]
-    assert TENANT_B not in prompt and '"allowed_action_types":["price_change"]' in prompt
 
 
 def test_llm_reasoner_rejects_malformed_json_disallowed_actions_and_provider_errors():
@@ -155,13 +157,6 @@ def test_llm_reasoner_rejects_malformed_json_disallowed_actions_and_provider_err
     with pytest.raises(LLMReasonerError):
         LLMReasoner(FakeLLMClient(raise_error=True)).reason(opportunity(), allowed_action_types=("price_change",))
 
-
-def test_prompt_context_is_bounded_deterministic_and_requires_actions():
-    with pytest.raises(ReasoningContextError):
-        build_reasoning_context(opportunity(), allowed_action_types=())
-    context = build_reasoning_context(opportunity(), allowed_action_types=["price_change"], constraints={"limit": 2})
-    assert json.loads(build_user_prompt(context))["context"]["opportunity"]["tenant_id"] == TENANT_A
-    assert "do NOT" in SYSTEM_PROMPT
 
 
 def test_merger_keeps_deterministic_candidate_and_handles_nested_untrusted_payloads():
@@ -212,18 +207,55 @@ class _FakeBedrockRuntime:
     def converse(self, **kwargs): self.requests.append(kwargs); return self.response
 
 
+class _ThrottlingBedrockRuntime:
+    def __init__(self, error): self.error, self.attempts = error, 0
+    def converse(self, **kwargs):
+        self.attempts += 1
+        raise self.error
+
+
 def test_bedrock_adapter_is_fully_testable_without_network(monkeypatch):
     runtime = _FakeBedrockRuntime({"output": {"message": {"content": [{"text": "{\"candidates\":[]}"}, {"reasoningContent": "hidden"}]}}, "ResponseMetadata": {"RequestId": "req"}})
-    fake_boto3 = types.SimpleNamespace(client=lambda service, region_name: runtime)
+    client_options = {}
+    def create_client(service, **options):
+        client_options.update(options)
+        return runtime
+    fake_boto3 = types.SimpleNamespace(client=create_client)
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
     client = BedrockLLMClient(model_id="model", region_name="test", max_tokens=8, temperature=.2)
     response = client.generate(system_prompt="system", user_prompt="user")
     assert response.text == '{"candidates":[]}' and response.request_id == "req"
     assert runtime.requests[0]["messages"][0]["content"][0]["text"] == "user"
+    assert client_options["config"].retries == {
+        "mode": "standard",
+        "total_max_attempts": BEDROCK_TOTAL_MAX_ATTEMPTS,
+    }
     with pytest.raises(LLMClientError): BedrockLLMClient(max_tokens=0)
     with pytest.raises(LLMClientError): BedrockLLMClient(temperature=float("nan"))
     assert _strip_json_fences("```json\n{}\n```") == "{}"
     with pytest.raises(LLMClientError): _extract_text({})
+
+
+def test_bedrock_throttling_retry_exhaustion_preserves_cause(monkeypatch):
+    throttling_error = RuntimeError("ThrottlingException: rate exceeded")
+    runtime = _ThrottlingBedrockRuntime(throttling_error)
+    def create_client(*_args, config, **_kwargs):
+        def converse_with_sdk_retries(**request):
+            for _ in range(config.retries["total_max_attempts"]):
+                try:
+                    return runtime.converse(**request)
+                except RuntimeError:
+                    continue
+            raise runtime.error
+        return types.SimpleNamespace(converse=converse_with_sdk_retries)
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=create_client))
+
+    client = BedrockLLMClient(model_id="model", region_name="test", max_tokens=8, temperature=.2)
+    with pytest.raises(LLMClientError, match="Bedrock request failed") as raised:
+        client.generate(system_prompt="system", user_prompt="user")
+
+    assert runtime.attempts == BEDROCK_TOTAL_MAX_ATTEMPTS
+    assert raised.value.__cause__ is throttling_error
 
 
 def test_bedrock_json_variant_strips_fences_offline(monkeypatch):

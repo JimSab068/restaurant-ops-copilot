@@ -1,0 +1,92 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Python artifacts
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+*.egg
+
+# Test / lint / type-check caches -- not needed at runtime, and tests/
+# pulls in fixtures + this very acceptance-catalog file, none of which
+# belong in a production image
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov/
+tests/
+
+# Docs -- not needed at runtime
+docs/
+README.md
+*.md
+functional_docs/
+scripts/
+terraform/
+
+
+# Local env / secrets -- these must come from the container's real
+# environment (ECS task def / Secrets Manager), never get baked into
+# the image via COPY
+.env
+.env.*
+*.pem
+*.key
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+
+# Docker's own files -- no reason to ship these inside the image
+Dockerfile
+Dockerfile.*
+.dockerignore
+docker-compose*.yml
+*.json
+*.md
+
+
+
+tests/
+pytest.ini
+conftest.py
+test_*.py
+*_test.py
+
+terraform/
+terraform-demo/
+*.tfstate
+*.tfstate.*
+.terraform/
+
+tenant_fixtures.json
+*_credentials.json
+acceptance_report_*.md
+acceptance_report_*.json
+llm_acceptance_report_*.md
+llm_acceptance_report_*.json
+failed.md
+
+.env
+.env.*
+.env.app
+*.zip
+scripts/
+check_seeded_tenants.py
+run_calibration_batch.py
+event_generator.py
+
+old_runs/
+

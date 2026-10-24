@@ -4,3 +4,25 @@ __pycache__
 .pem
 scripts/
 .pytest_cache/
+failed.md
+terrafrom-demo/
+.env.*
+.env.app
+tenant_fixtures.json
+*.zip
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.md
+*.json
+
+# Keep the public project entry point under version control; other generated
+# notes and reports remain ignored.
+!README.md
+
+old_runs/
+ops-copilot-api-logs-20261023.txt
+ops-copilot-api-logs-20261023.json
+ops-copilot-worker-logs-20261023.txt
+
+aws/

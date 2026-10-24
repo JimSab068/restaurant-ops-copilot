@@ -18,15 +18,18 @@ os.environ["DATABASE_URL"] = os.environ.get(
 )
 
 from Component_1.db import Base, engine
-import Component_1.models              # noqa: F401
-import Component_4.tool_models         # noqa: F401
-import Component_4.idempotency_models  # noqa: F401
-import Component_6.approval_models     # noqa: F401
-import Component_7.models   # noqa: F401
+import Component_1.models              
+import Component_4.tool_models      
+import Component_4.idempotency_models  
+import Component_6.approval_models     
+import Component_7.models   
 
-import api.credentials_models   # noqa: F401
-import api.work_request_models  # noqa: F401
+import api.credentials_models   
+import api.work_request_models  
 
 if __name__ == "__main__":
     Base.metadata.create_all(bind=engine)
-    print(f"Schema created/verified on: {engine.url}")
+    print(
+        "Schema created/verified on: "
+        f"{engine.url.render_as_string(hide_password=True)}"
+    )

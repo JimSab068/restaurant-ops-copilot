@@ -45,6 +45,7 @@ from Component_1.models import (
     SupplierSKU,
     Decision,
 )
+from Component_2.simulator import SimulatorInputError
 from Component_2.decision_engine import (
     execute_and_observe,
     propose_and_simulate,
@@ -749,11 +750,16 @@ def execute_tool_call(
     # ------------------------------------------------------------------
     # Component 2: proposal + simulation
     # ------------------------------------------------------------------
-    decision = propose_and_simulate(
-        tenant_id,
-        action_type,
-        payload,
-    )
+    try:
+        decision = propose_and_simulate(
+            tenant_id,
+            action_type,
+            payload,
+        )
+    except SimulatorInputError as exc:
+        raise ToolFrameworkError(
+            f"Invalid action input: {exc}"
+        ) from exc
 
     confidence_gate_passed = decision.confidence_threshold_cleared
 

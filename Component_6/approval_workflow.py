@@ -115,3 +115,4 @@ class ApprovalWorkflow:
         if won is None:
             raise ValueError("approval request has already been resolved")
         return resolved
+    

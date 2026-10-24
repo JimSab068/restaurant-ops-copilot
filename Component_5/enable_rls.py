@@ -448,6 +448,30 @@ def _grant_crud(
     )
 
 
+def _grant_api_credential_access(conn: Connection) -> None:
+    """Allow key lookup without tenant-scoping this authentication table."""
+    role = _validate_identifier(APP_ROLE, "APP_ROLE")
+
+    conn.execute(
+        text(
+            f"""
+            GRANT SELECT
+            ON TABLE public.api_credentials
+            TO {role}
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            GRANT UPDATE (last_used_at)
+            ON TABLE public.api_credentials
+            TO {role}
+            """
+        )
+    )
+
+
 def _configure_table(
     conn: Connection,
     table_name: str,
@@ -557,6 +581,13 @@ def configure_rls(engine: Engine) -> None:
 
         for table_name in ALL_RLS_TABLES:
             _configure_table(conn, table_name)
+
+        if not _table_exists(conn, "api_credentials"):
+            raise RuntimeError(
+                "Required authentication table does not exist: "
+                "public.api_credentials"
+            )
+        _grant_api_credential_access(conn)
 
         _grant_sequence_privileges(conn)
 
@@ -729,6 +760,33 @@ def _verify_policy_roles(
         )
 
 
+def _verify_api_credential_privileges(conn: Connection) -> None:
+    result = conn.execute(
+        text(
+            """
+            SELECT
+                has_table_privilege(
+                    :role,
+                    'public.api_credentials',
+                    'SELECT'
+                ) AS can_select,
+                has_column_privilege(
+                    :role,
+                    'public.api_credentials',
+                    'last_used_at',
+                    'UPDATE'
+                ) AS can_update_last_used
+            """
+        ),
+        {"role": APP_ROLE},
+    ).mappings().one()
+
+    if not result["can_select"] or not result["can_update_last_used"]:
+        raise AssertionError(
+            f"API credential privilege verification failed for {APP_ROLE!r}."
+        )
+
+
 def _verify_fail_closed(
     engine: Engine,
 ) -> None:
@@ -847,8 +905,14 @@ def verify_rls(engine: Engine) -> None:
         _validate_configuration_role(conn)
         _validate_roles(conn)
         _validate_tables(conn)
+        if not _table_exists(conn, "api_credentials"):
+            raise RuntimeError(
+                "Required authentication table does not exist: "
+                "public.api_credentials"
+            )
         _verify_policy_definition(conn)
         _verify_policy_roles(conn)
+        _verify_api_credential_privileges(conn)
 
     _verify_fail_closed(engine)
 

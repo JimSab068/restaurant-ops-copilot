@@ -56,10 +56,11 @@ import os
 from .llm_client import LLMClientError, LLMResponse
 
 
-DEFAULT_MODEL_ID = "google.gemma-4-26b-a4b-instruct-v1:0"
+DEFAULT_MODEL_ID = "google.gemma-3-4b-it"
 DEFAULT_REGION = "us-east-1"
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_TEMPERATURE = 0.2
+BEDROCK_TOTAL_MAX_ATTEMPTS = 3
 
 
 def _int_env(name: str, default: int) -> int:
@@ -133,15 +134,22 @@ class BedrockLLMClient:
 
         try:
             import boto3
+            from botocore.config import Config
         except ImportError as exc:
             raise LLMClientError(
-                "boto3 is required for BedrockLLMClient"
+                "boto3 and botocore are required for BedrockLLMClient"
             ) from exc
 
         try:
             self._client = boto3.client(
                 "bedrock-runtime",
                 region_name=self.region_name,
+                config=Config(
+                    retries={
+                        "mode": "standard",
+                        "total_max_attempts": BEDROCK_TOTAL_MAX_ATTEMPTS,
+                    }
+                ),
             )
         except Exception as exc:
             raise LLMClientError(

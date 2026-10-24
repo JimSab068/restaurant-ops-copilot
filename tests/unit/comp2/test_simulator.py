@@ -22,7 +22,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
-from tests.unit.conftest import tenant_with_data, tenant_with_historical_demand
+from tests.conftest import tenant_with_data, tenant_with_historical_demand
 from Component_1.db import (
     Base, 
     engine ,

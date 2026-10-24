@@ -30,9 +30,11 @@ from Component_1.models import (
     EventType,
     MenuItem,
 )
+from Component_2.simulator import SimulatorInputError
 from Component_2.decision_engine import DecisionStateError
 from Component_4.tool_framework import (
     TOOL_CATEGORY_BY_ACTION,
+    ToolFrameworkError,
     UnsupportedToolActionError,
     _apply_state_change,
     _current_value_for_critic,
@@ -86,6 +88,26 @@ def test_menu_add_is_logged_as_unsupported_before_simulation(
     assert result["executed"] is False
     assert result["reason"] == "unsupported_action"
     assert "initial price" in result["critic_reason"]
+
+
+def test_simulator_input_error_is_wrapped_as_tool_framework_error(
+    tenant_with_data,
+    monkeypatch,
+):
+    def reject_simulation(*args, **kwargs):
+        raise SimulatorInputError("menu item not found for this tenant")
+
+    monkeypatch.setattr(
+        "Component_4.tool_framework.propose_and_simulate",
+        reject_simulation,
+    )
+
+    with pytest.raises(ToolFrameworkError, match="Invalid action input"):
+        execute_tool_call(
+            tenant_with_data["tenant_id"],
+            ActionType.PRICE_CHANGE,
+            {"menu_item_id": "foreign-menu-item", "new_price": 13.0},
+        )
 
 
 def get_events(session, tenant_id):

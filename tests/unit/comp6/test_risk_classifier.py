@@ -273,7 +273,7 @@ class TestConfidence:
             0.10,
             0.50,
             0.79,
-            MIN_CONFIDENCE_FOR_AUTONOMOUS_ACTION - 0.000001,
+            MIN_CONFIDENCE_FOR_AUTONOMOUS_ACTION - Decimal("0.000001"),        
         ],
     )
     def test_low_confidence_is_high_risk(self, confidence):

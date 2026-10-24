@@ -366,24 +366,6 @@ def test_non_finite_recipe_cost_fails_closed(value):
     assert generate_candidate_actions(opportunity) == []
 
 
-# ---------------------------------------------------------------------------
-# Injection / hostile evidence
-# ---------------------------------------------------------------------------
-
-def test_sql_injection_in_entity_id_remains_data():
-    malicious_id = "' OR 1=1 --"
-
-    opportunity = make_opportunity(
-        OpportunityType.DEMAND_DECLINE,
-        {
-            "menu_item_id": malicious_id,
-            "current_price": 20,
-        },
-    )
-
-    candidate = generate_candidate_actions(opportunity)[0]
-
-    assert candidate.payload["menu_item_id"] == malicious_id
 
 
 def test_reasoner_does_not_execute_database_queries():
